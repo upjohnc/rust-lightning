@@ -18,6 +18,8 @@ use lightning::util::logger::Logger;
 use secp256k1::PublicKey;
 use core::ops::Deref;
 use core::time::Duration;
+use std::fmt::Debug;
+use std::iter::Iterator;
 
 /// Utility to create an invoice that can be paid to one of multiple nodes, or a "phantom invoice."
 /// See [`PhantomKeysManager`] for more information on phantom node payments.
@@ -229,7 +231,7 @@ where
 ///
 /// [`PhantomKeysManager`]: lightning::sign::PhantomKeysManager
 fn select_phantom_hints<L: Deref>(amt_msat: Option<u64>, phantom_route_hints: Vec<PhantomRouteHints>,
-	logger: L) -> Vec<RouteHint>
+	logger: L) -> impl std::iter::Iterator<Item = RouteHint>
 where
 	L::Target: Logger,
 {
@@ -267,29 +269,32 @@ where
 	// the hints across our real nodes we add one hint from each in turn until no node has any hints
 	// left (if one node has more hints than any other, these will accumulate at the end of the
 	// vector).
-	let mut invoice_hints: Vec<RouteHint> = Vec::new();
-	let mut hint_idx = 0;
+	const MAX_HINTS: usize = 3;
 
-	loop {
-		let mut remaining_hints = false;
+    let invoice_hints = zip_vectors(phantom_hints, MAX_HINTS);
+	invoice_hints
+}
 
-		for hints in phantom_hints.iter() {
-			if invoice_hints.len() == 3 {
-				return invoice_hints
-			}
+// Utility to zip nested vectors together.
+// THis allows for multiple nested vectors
+fn zip_vectors<T: Debug>(vecs: Vec<Vec<T>>, result_size: usize) -> impl Iterator<Item = T> {
+    // The `take` limits number of items that collected.
+    // It is known that the function will never return more than the RESULT_SIZE.
+    // For instance, if there is only one nested vector then the function will not
+    // need more from that nested vector than the RESULT_SIZE.
+    let mut enumerated_vecs = vecs
+        .into_iter()
+        .map(|v| v.into_iter().take(result_size).enumerate())
+        .flatten()
+        .collect::<Vec<(usize, T)>>();
+    enumerated_vecs.sort_by(|t1, t2| t1.0.cmp(&t2.0));
 
-			if hint_idx < hints.len() {
-				invoice_hints.push(hints[hint_idx].clone());
-				remaining_hints = true
-			}
-		}
+    let return_values = enumerated_vecs
+        .into_iter()
+        .take(result_size)
+        .map(|(_, v)| v);
 
-		if !remaining_hints {
-			return invoice_hints
-		}
-
-		hint_idx +=1;
-	}
+    return_values
 }
 
 #[cfg(feature = "std")]
@@ -777,7 +782,7 @@ mod test {
 	use lightning::routing::router::{PaymentParameters, RouteParameters};
 	use lightning::util::test_utils;
 	use lightning::util::config::UserConfig;
-	use crate::utils::create_invoice_from_channelmanager_and_duration_since_epoch;
+	use crate::utils::{create_invoice_from_channelmanager_and_duration_since_epoch, zip_vectors};
 	use std::collections::HashSet;
 
 	#[test]
@@ -1886,4 +1891,154 @@ mod test {
 			_ => panic!(),
 		}
 	}
+
+    const TEST_RESULT_SIZE: usize = 3;
+
+    #[test]
+    fn test_zip_vecs_one() {
+        // test two nested vectors
+        let a = vec![vec!["a0", "b0", "c0"], vec!["a1", "b1"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("b0"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_two() {
+        // test single nested vector
+        let a = vec![vec!["a0", "b0", "c0"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("b0"), result.next());
+        assert_eq!(Some("c0"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_three() {
+        // test second vector with only one element
+        let a = vec![vec!["a0", "b0", "c0"], vec!["a1"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("b0"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_four() {
+        // test three nestend vectors
+        let a = vec![vec!["a0"], vec!["a1", "b1", "c1"], vec!["a2"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("a2"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_five() {
+        // test single nested vector with a single value
+        let a = vec![vec!["a0"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_six() {
+        // test single empty nested vector
+        let a: Vec<Vec<i64>> = vec![vec![]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_seven() {
+        // test first nested vector is empty
+        let a = vec![vec![], vec!["a1", "b1", "c1"]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("b1"), result.next());
+        assert_eq!(Some("c1"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_eight() {
+        // test two empty vectors
+        let a: Vec<Vec<i64>> = vec![vec![], vec![]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_nine() {
+        // test an empty vector amongst other filled vectors
+        let a = vec![
+            vec!["a0", "b0", "c0"],
+            vec![],
+            vec!["a1", "b1", "c1"],
+            vec!["a2", "b2", "c2"],
+        ];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("a2"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_ten() {
+        // test a filled vector between two empty vectors
+        let a = vec![vec![], vec!["a1", "b1", "c1"], vec![]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("b1"), result.next());
+        assert_eq!(Some("c1"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_eleven() {
+        // test an empty vector at the end of the vectors
+        let a = vec![vec!["a0", "b0", "c0"], vec![]];
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a0"), result.next());
+        assert_eq!(Some("b0"), result.next());
+        assert_eq!(Some("c0"), result.next());
+        assert_eq!(None, result.next());
+    }
+
+    #[test]
+    fn test_zip_vecs_twelve() {
+        // test multiple empty vectors amongst multiple filled vectors
+        let a = vec![
+            vec![],
+            vec!["a1", "b1", "c1"],
+            vec![],
+            vec!["a3", "b3"],
+            vec![],
+        ];
+
+        let mut result = zip_vectors(a, TEST_RESULT_SIZE);
+
+        assert_eq!(Some("a1"), result.next());
+        assert_eq!(Some("a3"), result.next());
+        assert_eq!(Some("b1"), result.next());
+        assert_eq!(None, result.next());
+    }
 }
